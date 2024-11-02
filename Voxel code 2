@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Infinite Voxel World with Block Placement</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.8.3/nipplejs.min.js"></script>
+  <style>
+    body, html { margin: 0; overflow: hidden; height: 100%; }
+    #gameCanvas { width: 100%; height: 100%; }
+    .joystick { position: absolute; bottom: 20px; left: 20px; width: 100px; height: 100px; }
+    #positionDisplay { position: absolute; top: 10px; left: 10px; color: white; font-size: 20px; z-index: 1; }
+    /* Crosshair Styles */
+    #crosshair {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 20px;
+      height: 20px;
+      margin-left: -10px;
+      margin-top: -10px;
+      pointer-events: none;
+      z-index: 2;
+    }
+    #crosshair:before, #crosshair:after {
+      content: '';
+      position: absolute;
+      background: white;
+    }
+    #crosshair:before {
+      left: 9px;
+      top: 0;
+      width: 2px;
+      height: 20px;
+    }
+    #crosshair:after {
+      left: 0;
+      top: 9px;
+      width: 20px;
+      height: 2px;
+    }
+    /* Place Block Button Styles */
+    #placeBlockButton {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      padding: 10px 20px;
+      background-color: rgba(255, 255, 255, 0.8);
+      border: none;
+      border-radius: 5px;
+      font-size: 16px;
+      cursor: pointer;
+      z-index: 1;
+    }
+    #placeBlockButton:hover {
+      background-color: rgba(255, 255, 255, 1);
+    }
+  </style>
+</head>
+<body>
+ 
+  <div id="gameCanvas"></div>
+  <div class="joystick" id="joystickZone"></div>
+  <div id="positionDisplay">Position: (0, 0)</div> <!-- Position display -->
+  
+  <!-- Crosshair -->
+  <div id="crosshair"></div>
+  
+  <!-- Place Block Button -->
+  <button id="placeBlockButton">Place Block</button>
+  
+</body>
+<script>
+  let scene, camera, renderer, sun;
+  let chunkSize = 10;
+  let blocks = new Map();
+  let placedBlocks = new Map(); // To keep track of placed blocks
+  let walkOffset = 0;
+  let isTouching = false;
+  let lastTouchX = 0, lastTouchY = 0;
+  let cameraRotationSpeed = 0.002;
+  let isJoystickActive = false;
+  const blockSize = 1;
+  const moveSpeed = 0.06;
+  const collisionDistance = 0.6;
+  let trunkTexture, leafTexture, blockTexture;
+  
+  const chunkVisibilityDistance = 2;
+  
+  let raycaster, mouse;
+  let targetIndicator;
+  
+  function init() {
+    // Scene and Camera Setup
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+  
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 2, 10);
+    camera.rotation.order = 'YXZ';
+  
+    // Renderer Setup
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true; // Enable shadows
+    document.getElementById('gameCanvas').appendChild(renderer.domElement);
+  
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+  
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(5, 10, 7.5);
+    directionalLight.castShadow = true; // Enable shadow casting for the light
+    directionalLight.shadow.mapSize.width = 1024;  // Adjust for shadow resolution
+    directionalLight.shadow.mapSize.height = 1024;
+    directionalLight.shadow.camera.near = 1;
+    directionalLight.shadow.camera.far = 50;
+    scene.add(directionalLight);
+  
+    // Create the "sun" as a square plane
+    const sunGeometry = new THREE.PlaneGeometry(2, 2); // Adjust size as needed
+    const sunMaterial = new THREE.MeshBasicMaterial({ color: 0xffd700 });
+    sun = new THREE.Mesh(sunGeometry, sunMaterial);
+    sun.position.set(directionalLight.position.x, directionalLight.position.y, directionalLight.position.z);
+    sun.lookAt(0, 0, 0);
+    scene.add(sun);
+  
+    // Load Textures
+    const loader = new THREE.TextureLoader();
+    const groundTextureURL = 'content://media/external/downloads/1000004690'; // Placeholder URL
+    const trunkTextureURL = 'content://media/external/downloads/1000004741'; // Placeholder URL
+    const leafTextureURL = 'content://media/external/downloads/1000004736'; // Placeholder URL
+    
+    // Replace the URLs above with your actual texture paths
+    const groundTexture = loader.load(groundTextureURL);
+    trunkTexture = loader.load(trunkTextureURL);
+    leafTexture = loader.load(leafTextureURL);
+    blockTexture = loader.load(groundTextureURL); // Using ground texture for blocks
+  
+    groundTexture.wrapS = groundTexture.wrapT = THREE.RepeatWrapping;
+    groundTexture.repeat.set(1, 1);
+  
+    generateTerrain(camera.position.x, camera.position.z, groundTexture);
+  
+    // Initialize Raycaster
+    raycaster = new THREE.Raycaster();
+    mouse = new THREE.Vector2(); // Not used for center crosshair, but kept for reference
+  
+    // Create Target Indicator (Semi-transparent cube)
+    const indicatorGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
+    const indicatorMaterial = new THREE.MeshBasicMaterial({ 
+      color: 0x00ff00, 
+      opacity: 0.5, 
+      transparent: true, 
+      depthWrite: false 
+    });
+    targetIndicator = new THREE.Mesh(indicatorGeometry, indicatorMaterial);
+    targetIndicator.visible = false;
+    scene.add(targetIndicator);
+  
+    let moveDirection = { x: 0, z: 0 };
+  
+    // Initialize Joystick
+    const joystick = nipplejs.create({
+      zone: document.getElementById('joystickZone'),
+      mode: 'static',
+      position: { left: '50%', bottom: '50%' },
+      color: 'white',
+    });
+  
+    joystick.on('move', (event, data) => {
+      const angle = data.angle.degree * (Math.PI / 180);
+      moveDirection.x = -Math.cos(angle) * data.distance / 50;
+      moveDirection.z = Math.sin(angle) * data.distance / 50;
+      isJoystickActive = true;
+    });
+  
+    joystick.on('end', () => {
+      moveDirection.x = 0;
+      moveDirection.z = 0;
+      isJoystickActive = false;
+    });
+  
+    // Touch Controls for Camera Rotation
+    document.addEventListener('touchstart', (event) => {
+      isTouching = true;
+      lastTouchX = event.touches[0].clientX;
+      lastTouchY = event.touches[0].clientY;
+    });
+  
+    document.addEventListener('touchmove', (event) => {
+      if (isTouching && !isJoystickActive) {
+        const touchX = event.touches[0].clientX;
+        const touchY = event.touches[0].clientY;
+        const deltaX = touchX - lastTouchX;
+        const deltaY = touchY - lastTouchY;
+  
+        camera.rotation.y -= deltaX * cameraRotationSpeed;
+        camera.rotation.x -= deltaY * cameraRotationSpeed;
+  
+        camera.rotation.x = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, camera.rotation.x));
+        lastTouchX = touchX;
+        lastTouchY = touchY;
+      }
+    });
+  
+    // Handle Place Block Button Click
+    document.getElementById('placeBlockButton').addEventListener('click', placeBlock);
+  
+    function animate() {
+      requestAnimationFrame(animate);
+  
+      const forward = new THREE.Vector3();
+      camera.getWorldDirection(forward);
+      forward.y = 0;
+      forward.normalize();
+  
+      const right = new THREE.Vector3();
+      right.crossVectors(camera.up, forward).normalize();
+  
+      const intendedPosition = camera.position.clone();
+      intendedPosition.addScaledVector(forward, moveDirection.z * moveSpeed);
+      intendedPosition.addScaledVector(right, moveDirection.x * moveSpeed);
+  
+      if (!detectCollision(intendedPosition)) {
+        camera.position.copy(intendedPosition);
+      }
+  
+      if (moveDirection.x !== 0 || moveDirection.z !== 0) {
+        walkOffset += 0.3;
+        camera.position.y = 3 + Math.sin(walkOffset) * 0.08;
+      } else {
+        camera.position.y = 3;
+      }
+  
+      generateTerrain(camera.position.x, camera.position.z, groundTexture);
+  
+      // Update the sun's position to match the light
+      sun.position.copy(directionalLight.position);
+      sun.lookAt(camera.position);
+  
+      // Update position display
+      document.getElementById('positionDisplay').innerText = `Position: (${camera.position.x.toFixed(2)}, ${camera.position.z.toFixed(2)})`;
+  
+      // Raycasting to determine target block position
+      updateTargetIndicator();
+  
+      renderer.render(scene, camera);
+    }
+    animate();
+  }
+  
+  function detectCollision(position) {
+    for (const chunk of blocks.values()) {
+      for (const block of chunk.children) {
+        const distance = block.position.distanceTo(position);
+        if (distance < collisionDistance) {
+          return true;
+        }
+      }
+    }
+    // Also check placed blocks
+    for (const chunk of placedBlocks.values()) {
+      for (const block of chunk.children) {
+        const distance = block.position.distanceTo(position);
+        if (distance < collisionDistance) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  
+  function generateTerrain(playerX, playerZ, groundTexture) {
+    const chunkX = Math.floor(playerX / chunkSize);
+    const chunkZ = Math.floor(playerZ / chunkSize);
+  
+    const currentChunks = new Set();
+  
+    for (let x = chunkX - chunkVisibilityDistance; x <= chunkX + chunkVisibilityDistance; x++) {
+      for (let z = chunkZ - chunkVisibilityDistance; z <= chunkZ + chunkVisibilityDistance; z++) {
+        const chunkId = `${x},${z}`;
+        currentChunks.add(chunkId);
+        if (!blocks.has(chunkId)) {
+          const chunk = createChunk(x * chunkSize, z * chunkSize, groundTexture);
+          blocks.set(chunkId, chunk);
+          scene.add(chunk);
+        }
+      }
+    }
+  
+    // Remove chunks that are no longer in view
+    for (const chunkId of blocks.keys()) {
+      if (!currentChunks.has(chunkId)) {
+        const chunkToRemove = blocks.get(chunkId);
+        scene.remove(chunkToRemove);
+        blocks.delete(chunkId);
+      }
+    }
+  }
+  
+  function createChunk(offsetX, offsetZ, texture) {
+    const chunk = new THREE.Group();
+    const boxGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
+    const boxMaterial = new THREE.MeshStandardMaterial({ map: texture });
+  
+    for (let x = 0; x < chunkSize; x++) {
+      for (let z = 0; z < chunkSize; z++) {
+        const box = new THREE.Mesh(boxGeometry, boxMaterial);
+        box.position.set(offsetX + x, 0, offsetZ + z);
+        box.castShadow = true;      // Enable shadow casting
+        box.receiveShadow = true;   // Enable shadow receiving
+        chunk.add(box);
+  
+        if (Math.random() < 0.01) {
+          createTree(chunk, offsetX + x, 0, offsetZ + z);
+        }
+      }
+    }
+    return chunk;
+  }
+  
+  function createTree(chunk, x, y, z) {
+    const trunkGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
+    const trunkMaterial = new THREE.MeshStandardMaterial({ map: trunkTexture });
+    for (let i = 0; i < 3; i++) {
+      const trunkBlock = new THREE.Mesh(trunkGeometry, trunkMaterial);
+      trunkBlock.position.set(x, y + i, z);
+      trunkBlock.castShadow = true;
+      trunkBlock.receiveShadow = true;
+      chunk.add(trunkBlock);
+    }
+  
+    const leafGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
+    const leafMaterial = new THREE.MeshStandardMaterial({ map: leafTexture });
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dy = 0; dy <= 1; dy++) {
+          const leafBlock = new THREE.Mesh(leafGeometry, leafMaterial);
+          leafBlock.position.set(x + dx, y + 3 + dy, z + dz);
+          leafBlock.castShadow = true;
+          leafBlock.receiveShadow = true;
+          chunk.add(leafBlock);
+        }
+      }
+    }
+  }
+  
+  function updateTargetIndicator() {
+    // Set up the raycaster to point in the camera's direction
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera); // Center of the screen
+    
+    // Define objects to intersect (terrain blocks and placed blocks)
+    const terrainBlocks = [];
+    for (const chunk of blocks.values()) {
+      terrainBlocks.push(...chunk.children);
+    }
+    for (const chunk of placedBlocks.values()) {
+      terrainBlocks.push(...chunk.children);
+    }
+    
+    // Perform raycasting
+    const intersects = raycaster.intersectObjects(terrainBlocks, false);
+    
+    if (intersects.length > 0) {
+      const intersect = intersects[0];
+      const normal = intersect.face.normal;
+      const intersectedBlock = intersect.object;
+      const intersectPosition = intersectedBlock.position.clone();
+      
+      // Determine the adjacent block position based on the face normal
+      const targetPosition = new THREE.Vector3(
+        intersectPosition.x + normal.x,
+        intersectPosition.y + normal.y,
+        intersectPosition.z + normal.z
+      );
+      
+      // Snap the target position to the grid
+      targetPosition.x = Math.round(targetPosition.x);
+      targetPosition.y = Math.round(targetPosition.y);
+      targetPosition.z = Math.round(targetPosition.z);
+      
+      // Update the target indicator position
+      targetIndicator.position.copy(targetPosition);
+      targetIndicator.visible = true;
+    } else {
+      targetIndicator.visible = false;
+    }
+  }
+  
+  function placeBlock() {
+    if (!targetIndicator.visible) return; // No valid target
+    
+    const blockPosition = targetIndicator.position.clone();
+    const key = `${blockPosition.x},${blockPosition.z}`;
+    
+    // Determine which chunk the block belongs to
+    const chunkX = Math.floor(blockPosition.x / chunkSize);
+    const chunkZ = Math.floor(blockPosition.z / chunkSize);
+    const chunkId = `${chunkX},${chunkZ}`;
+    
+    let chunk;
+    if (blocks.has(chunkId)) {
+      chunk = blocks.get(chunkId);
+    } else if (placedBlocks.has(chunkId)) {
+      chunk = placedBlocks.get(chunkId);
+    } else {
+      // Create a new chunk for placed blocks if it doesn't exist
+      chunk = new THREE.Group();
+      placedBlocks.set(chunkId, chunk);
+      scene.add(chunk);
+    }
+    
+    // Check if a block already exists at the position
+    const existingBlock = chunk.children.find(block => 
+      block.position.x === blockPosition.x &&
+      block.position.y === blockPosition.y &&
+      block.position.z === blockPosition.z
+    );
+    if (existingBlock) {
+      alert('A block already exists at this position!');
+      return;
+    }
+    
+    // Create and add the new block
+    const boxGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
+    const boxMaterial = new THREE.MeshStandardMaterial({ map: blockTexture });
+    const newBlock = new THREE.Mesh(boxGeometry, boxMaterial);
+    newBlock.position.copy(blockPosition);
+    newBlock.castShadow = true;
+    newBlock.receiveShadow = true;
+    chunk.add(newBlock);
+  }
+  
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+  
+  init();
+</script>
+</html>
